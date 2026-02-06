@@ -28,6 +28,24 @@
 - 主視窗點「開啟篩選器視窗」
 - 篩選結果會立即影響圖表與儀表板
 
+**樞紐（Rows / Columns / Values）**
+1. 先用「篩選器」設定要的資料範圍  
+2. 左側「樞紐」區塊選擇列（Rows）  
+3. 左側「樞紐」區塊選擇欄（Columns）  
+4. 左側「樞紐」區塊選擇值（Values，可多選）  
+5. 左側「樞紐」區塊選擇彙總（sum / count / mean / ...）  
+6. 按「套用樞紐」  
+7. 右側「樞紐」分頁會顯示樞紐表與樞紐圖表
+
+**樞紐圖表類型**
+- 長條
+- 折線
+- 長條+折線（多欄位時折線會畫「總和」）
+
+**完整標籤**
+- 在「欄位架 / 圖表」勾選「完整標籤」
+- X 軸會換行並完整顯示中文（不再縮成 ...）
+
 **統計模板**
 - 點「新增模板」可保存目前圖表與篩選設定
 - 模板會自動命名為「模板1 / 模板2 / ...」
@@ -45,10 +63,24 @@
 **資料儲存**
 - `data/latest.csv`
 - `data/history/history_YYYY-MM-DD.csv`
+- `data/app.log`（程式日誌）
+- `data/update.log`（更新/排程日誌）
 
-**打包 Windows EXE（PyInstaller）**
+**打包 Windows EXE（PyInstaller / onedir）**
 1. `pip install pyinstaller`
-2. `pyinstaller --onefile --noconsole --name CsvDashboardDesktop app.py`
+2. `pyinstaller --onedir --noconsole --name CsvDashboardDesktop --collect-all PySide6 --collect-all pandas --collect-all numpy app.py`
+3. `pyinstaller --onedir --noconsole --name CsvDashboardUpdater --collect-all PySide6 --collect-all pandas --collect-all numpy updater.py`
 
-> 若要更穩定，可用資料夾模式：
-> `pyinstaller --noconsole --name CsvDashboardDesktop app.py`
+**Windows 工作排程（每天 12:00 自動更新）**
+1. 把 `windows-bundle` 解壓縮  
+2. 進入資料夾後執行 `schedule_task.bat`  
+3. 排程會每天 12:00 執行 `CsvDashboardUpdater`
+4. 若要移除排程，執行 `remove_task.bat`
+
+**Nuitka（可選）**
+```
+python -m nuitka --standalone --enable-plugin=pyside6 --output-dir=nuitka_dist --output-filename=CsvDashboardDesktop.exe app.py
+```
+
+> EXE 不需要安裝 Python 或編譯工具即可執行  
+> 若遇到閃退，請確認已安裝 Microsoft Visual C++ Redistributable (x64)

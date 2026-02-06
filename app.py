@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+import logging
+from logging.handlers import RotatingFileHandler
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -113,9 +115,11 @@ class ChartConfig:
     pivot_chart_type: Optional[str] = None
 
 
-DATA_DIR = Path("data")
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 TEMPLATES_PATH = DATA_DIR / "templates.json"
 COLUMN_META_PATH = DATA_DIR / "column_meta.json"
+LOG_PATH = DATA_DIR / "app.log"
 METRIC_X_LABEL = "(度量)"
 
 
@@ -158,6 +162,23 @@ def save_column_meta(meta: Dict[str, str]) -> None:
     ensure_data_dir()
     with COLUMN_META_PATH.open("w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2, ensure_ascii=False)
+
+
+def setup_logging() -> None:
+    ensure_data_dir()
+    logger = logging.getLogger()
+    if logger.handlers:
+        return
+    handler = RotatingFileHandler(LOG_PATH, maxBytes=2_000_000, backupCount=3, encoding="utf-8")
+    formatter = logging.Formatter("[%(asctime)s] %(levelname)s %(message)s")
+    handler.setFormatter(formatter)
+    logger.setLevel(logging.INFO)
+    logger.addHandler(handler)
+
+    def handle_exception(exc_type, exc_value, exc_tb) -> None:
+        logger.exception("Unhandled exception", exc_info=(exc_type, exc_value, exc_tb))
+
+    sys.excepthook = handle_exception
 
 
 def next_template_name(templates: List[Dict[str, Any]]) -> str:
@@ -1990,6 +2011,8 @@ class MainWindow(QMainWindow):
 
 
 def main() -> int:
+    setup_logging()
+    logging.info("App start")
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()

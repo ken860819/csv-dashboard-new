@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import traceback
 from datetime import datetime
 from pathlib import Path
@@ -8,7 +9,8 @@ from typing import Optional
 
 import pandas as pd
 
-DATA_DIR = Path("data")
+BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
+DATA_DIR = BASE_DIR / "data"
 HISTORY_DIR = DATA_DIR / "history"
 CONFIG_PATH = DATA_DIR / "config.json"
 LATEST_CSV = DATA_DIR / "latest.csv"
