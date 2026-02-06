@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+import json
+import re
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QDate, QDateTime, QModelIndex, Qt
@@ -16,6 +18,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDateEdit,
     QDoubleSpinBox,
+    QDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -102,6 +105,47 @@ class ChartConfig:
     title: str
 
 
+DATA_DIR = Path("data")
+TEMPLATES_PATH = DATA_DIR / "templates.json"
+
+
+def ensure_data_dir() -> None:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def load_templates() -> List[Dict[str, Any]]:
+    ensure_data_dir()
+    if not TEMPLATES_PATH.exists():
+        return []
+    try:
+        with TEMPLATES_PATH.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_templates(templates: List[Dict[str, Any]]) -> None:
+    ensure_data_dir()
+    with TEMPLATES_PATH.open("w", encoding="utf-8") as f:
+        json.dump(templates, f, indent=2, ensure_ascii=False)
+
+
+def next_template_name(templates: List[Dict[str, Any]]) -> str:
+    existing = {tpl.get("name", "") for tpl in templates}
+    idx = 1
+    while f"模板{idx}" in existing:
+        idx += 1
+    return f"模板{idx}"
+
+
+def normalize_json_value(value: Any) -> Any:
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, (pd.Timestamp, datetime)):
+        return value.isoformat()
+    return value
+
+
 class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -113,6 +157,9 @@ class MainWindow(QMainWindow):
         self.parsed_dates: Dict[str, pd.Series] = {}
         self.filter_controls: Dict[str, Dict[str, Any]] = {}
         self.charts: List[ChartConfig] = []
+        self.templates: List[Dict[str, Any]] = []
+        self.filter_dialog: Optional[QDialog] = None
+        self.filter_summary_label: Optional[QLabel] = None
 
         self._build_ui()
         self._load_initial_data()
@@ -126,6 +173,8 @@ class MainWindow(QMainWindow):
 
         self._build_left_panel(splitter)
         self._build_right_panel(splitter)
+        self._build_filter_dialog()
+        self._load_templates()
 
         self.setCentralWidget(root)
 
@@ -139,8 +188,9 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(8, 8, 8, 8)
 
         left_layout.addWidget(self._build_data_source_group())
-        left_layout.addWidget(self._build_filter_group())
+        left_layout.addWidget(self._build_filter_launcher_group())
         left_layout.addWidget(self._build_chart_builder_group())
+        left_layout.addWidget(self._build_template_group())
         left_layout.addStretch(1)
 
         parent.addWidget(left_widget)
@@ -182,12 +232,32 @@ class MainWindow(QMainWindow):
         self.keep_history_checkbox.setChecked(True)
         form.addRow("", self.keep_history_checkbox)
 
+        self.use_date_checkbox = QCheckBox("使用日期樣板")
+        self.use_date_checkbox.setChecked(False)
+        form.addRow("", self.use_date_checkbox)
+
+        self.date_format_input = QLineEdit()
+        self.date_format_input.setPlaceholderText("%m%d")
+        form.addRow("日期格式", self.date_format_input)
+
+        self.auto_load_checkbox = QCheckBox("啟動時自動更新")
+        self.auto_load_checkbox.setChecked(False)
+        form.addRow("", self.auto_load_checkbox)
+
         layout.addLayout(form)
+
+        self.date_help = QLabel("路徑可用 {date} 或 {date:%m%d}；未使用時會嘗試替換檔名最後一段數字")
+        self.date_help.setWordWrap(True)
+        layout.addWidget(self.date_help)
 
         button_row = QHBoxLayout()
         self.load_button = QPushButton("從路徑更新")
-        self.load_button.clicked.connect(self.load_from_path)
+        self.load_button.clicked.connect(lambda: self.load_from_path())
         button_row.addWidget(self.load_button)
+
+        self.upload_button = QPushButton("選檔並更新")
+        self.upload_button.clicked.connect(self.select_and_load)
+        button_row.addWidget(self.upload_button)
 
         self.load_latest_button = QPushButton("載入最新")
         self.load_latest_button.clicked.connect(self.load_latest)
@@ -200,6 +270,28 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.source_status)
 
         return group
+
+    def _build_filter_launcher_group(self) -> QGroupBox:
+        group = QGroupBox("篩選器")
+        layout = QVBoxLayout(group)
+
+        self.open_filter_button = QPushButton("開啟篩選器視窗")
+        self.open_filter_button.clicked.connect(self.open_filter_dialog)
+        layout.addWidget(self.open_filter_button)
+
+        self.filter_summary_label = QLabel("篩選後筆數: -")
+        self.filter_summary_label.setWordWrap(True)
+        layout.addWidget(self.filter_summary_label)
+
+        return group
+
+    def _build_filter_dialog(self) -> None:
+        self.filter_dialog = QDialog(self)
+        self.filter_dialog.setWindowTitle("篩選器")
+        self.filter_dialog.setModal(False)
+        self.filter_dialog.resize(420, 720)
+        layout = QVBoxLayout(self.filter_dialog)
+        layout.addWidget(self._build_filter_group())
 
     def _build_filter_group(self) -> QGroupBox:
         group = QGroupBox("篩選器")
@@ -214,10 +306,13 @@ class MainWindow(QMainWindow):
         self.filter_area.setWidgetResizable(True)
         self.filter_area_widget = QWidget()
         self.filter_area_layout = QVBoxLayout(self.filter_area_widget)
+        self.filter_area_layout.setSpacing(20)
+        self.filter_area_layout.setContentsMargins(6, 6, 6, 6)
         self.filter_area_layout.addStretch(1)
         self.filter_area.setWidget(self.filter_area_widget)
         layout.addWidget(self.filter_area)
 
+        layout.addSpacing(6)
         btn_layout = QHBoxLayout()
         self.apply_filter_button = QPushButton("套用篩選")
         self.apply_filter_button.clicked.connect(self.apply_filters)
@@ -285,6 +380,34 @@ class MainWindow(QMainWindow):
 
         return group
 
+    def _build_template_group(self) -> QGroupBox:
+        group = QGroupBox("統計模板")
+        layout = QVBoxLayout(group)
+
+        self.template_combo = QComboBox()
+        layout.addWidget(self.template_combo)
+
+        button_row = QHBoxLayout()
+        self.template_apply_button = QPushButton("套用模板")
+        self.template_apply_button.clicked.connect(self.apply_template)
+        button_row.addWidget(self.template_apply_button)
+
+        self.template_save_button = QPushButton("新增模板")
+        self.template_save_button.clicked.connect(self.save_template)
+        button_row.addWidget(self.template_save_button)
+
+        self.template_delete_button = QPushButton("刪除模板")
+        self.template_delete_button.clicked.connect(self.delete_template)
+        button_row.addWidget(self.template_delete_button)
+
+        layout.addLayout(button_row)
+
+        self.template_status = QLabel("")
+        self.template_status.setWordWrap(True)
+        layout.addWidget(self.template_status)
+
+        return group
+
     def _build_preview_tab(self) -> None:
         preview_widget = QWidget()
         preview_layout = QVBoxLayout(preview_widget)
@@ -326,6 +449,14 @@ class MainWindow(QMainWindow):
         if encoding in ["auto", "utf-8-sig", "utf-8", "cp950", "big5", "latin1"]:
             self.encoding_combo.setCurrentText(encoding)
         self.keep_history_checkbox.setChecked(bool(cfg.get("keep_history", True)))
+        self.use_date_checkbox.setChecked(bool(cfg.get("use_date_template", False)))
+        self.date_format_input.setText(cfg.get("date_format", "%m%d"))
+        self.auto_load_checkbox.setChecked(bool(cfg.get("auto_load_on_start", False)))
+
+        if cfg.get("auto_load_on_start") and cfg.get("source_path"):
+            loaded = self.load_from_path(show_message=False)
+            if loaded:
+                return
 
         df = load_latest_df()
         if df is not None:
@@ -337,27 +468,72 @@ class MainWindow(QMainWindow):
         if file_path:
             self.path_input.setText(file_path)
 
-    def load_from_path(self) -> None:
-        path = self.path_input.text().strip()
-        if not path:
-            QMessageBox.warning(self, "CSV", "請輸入檔案路徑")
+    def select_and_load(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(self, "選擇 CSV", "", "CSV Files (*.csv)")
+        if not file_path:
             return
+        self.path_input.setText(file_path)
+        self.load_from_path()
+
+    def resolve_source_path(self, raw_path: str) -> str:
+        if not raw_path:
+            return raw_path
+        if not self.use_date_checkbox.isChecked():
+            return raw_path
+
+        fmt = self.date_format_input.text().strip() or "%m%d"
+        today_str = datetime.now().strftime(fmt)
+
+        if "{date" in raw_path:
+            def replace(match: re.Match[str]) -> str:
+                fmt_override = match.group(1) or fmt
+                return datetime.now().strftime(fmt_override)
+
+            return re.sub(r"\{date(?::([^}]+))?\}", replace, raw_path)
+
+        name = Path(raw_path).name
+        pattern = rf"(\\d{{{len(today_str)}}})(?!.*\\d)"
+        new_name = re.sub(pattern, today_str, name, count=1)
+        if new_name != name:
+            return str(Path(raw_path).with_name(new_name))
+        return raw_path
+
+    def open_filter_dialog(self) -> None:
+        if self.filter_dialog is None:
+            return
+        self.filter_dialog.show()
+        self.filter_dialog.raise_()
+        self.filter_dialog.activateWindow()
+
+    def load_from_path(self, show_message: bool = True) -> bool:
+        raw_path = self.path_input.text().strip()
+        path = self.resolve_source_path(raw_path)
+        if not path:
+            if show_message:
+                QMessageBox.warning(self, "CSV", "請輸入檔案路徑")
+            return False
 
         cfg = load_config()
-        cfg["source_path"] = path
+        cfg["source_path"] = raw_path
         cfg["encoding"] = self.encoding_combo.currentText()
         cfg["keep_history"] = self.keep_history_checkbox.isChecked()
+        cfg["use_date_template"] = self.use_date_checkbox.isChecked()
+        cfg["date_format"] = self.date_format_input.text().strip() or "%m%d"
+        cfg["auto_load_on_start"] = self.auto_load_checkbox.isChecked()
         save_config(cfg)
 
         df, err = safe_update(path, cfg["encoding"], "manual")
         if err:
-            QMessageBox.critical(self, "更新失敗", err)
-            return
+            if show_message:
+                QMessageBox.critical(self, "更新失敗", err)
+            return False
         if df is None:
-            QMessageBox.critical(self, "更新失敗", "讀取失敗")
-            return
+            if show_message:
+                QMessageBox.critical(self, "更新失敗", "讀取失敗")
+            return False
         self.set_data(df)
         self.source_status.setText(f"已更新: {path}")
+        return True
 
     def load_latest(self) -> None:
         df = load_latest_df()
@@ -406,8 +582,15 @@ class MainWindow(QMainWindow):
                 continue
             col = item.text()
             series = self.df[col]
+
             group = QGroupBox(col)
+            group.setStyleSheet(
+                "QGroupBox { margin-top: 12px; }"
+                "QGroupBox::title { subcontrol-origin: margin; left: 8px; padding: 0 4px; }"
+            )
             group_layout = QVBoxLayout(group)
+            group_layout.setContentsMargins(12, 24, 12, 12)
+            group_layout.setSpacing(10)
 
             if pd.api.types.is_numeric_dtype(series):
                 min_val = float(series.min()) if series.notna().any() else 0.0
@@ -419,6 +602,8 @@ class MainWindow(QMainWindow):
                 max_spin = QDoubleSpinBox()
                 max_spin.setRange(-1e18, 1e18)
                 max_spin.setValue(max_val)
+                min_spin.setMinimumHeight(28)
+                max_spin.setMinimumHeight(28)
 
                 form = QFormLayout()
                 form.addRow("最小值", min_spin)
@@ -440,6 +625,8 @@ class MainWindow(QMainWindow):
                     start_edit.setCalendarPopup(True)
                     end_edit = QDateEdit()
                     end_edit.setCalendarPopup(True)
+                    start_edit.setMinimumHeight(28)
+                    end_edit.setMinimumHeight(28)
 
                     if pd.notna(min_date):
                         start_edit.setDate(QDate(min_date.year, min_date.month, min_date.day))
@@ -464,13 +651,14 @@ class MainWindow(QMainWindow):
                         group_layout.addWidget(QLabel("只顯示前 2000 個值"))
 
                     list_widget = QListWidget()
+                    list_widget.setSpacing(2)
                     for value in sorted(values, key=lambda x: str(x)):
                         item = QListWidgetItem(str(value))
                         item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                         item.setCheckState(Qt.Checked)
                         item.setData(Qt.UserRole, value)
                         list_widget.addItem(item)
-                    list_widget.setMaximumHeight(160)
+                    list_widget.setMinimumHeight(200)
                     group_layout.addWidget(list_widget)
 
                     self.filter_controls[col] = {
@@ -509,6 +697,8 @@ class MainWindow(QMainWindow):
 
         self.filtered_df = df
         self.filter_status.setText(f"篩選後筆數: {len(df):,}")
+        if self.filter_summary_label is not None:
+            self.filter_summary_label.setText(f"篩選後筆數: {len(df):,}")
 
         model = self.preview_table.model()
         if isinstance(model, DataFrameModel):
@@ -522,6 +712,82 @@ class MainWindow(QMainWindow):
             item = self.filter_column_list.item(i)
             item.setCheckState(Qt.Unchecked)
         self.rebuild_filter_widgets()
+        self.apply_filters()
+
+    def get_filter_state(self) -> Dict[str, Any]:
+        columns: List[str] = []
+        for i in range(self.filter_column_list.count()):
+            item = self.filter_column_list.item(i)
+            if item.checkState() == Qt.Checked:
+                columns.append(item.text())
+
+        values: Dict[str, Any] = {}
+        for col, ctrl in self.filter_controls.items():
+            if ctrl["type"] == "numeric":
+                values[col] = {
+                    "type": "numeric",
+                    "min": float(ctrl["min"].value()),
+                    "max": float(ctrl["max"].value()),
+                }
+            elif ctrl["type"] == "datetime":
+                start = ctrl["start"].date().toPython()
+                end = ctrl["end"].date().toPython()
+                values[col] = {
+                    "type": "datetime",
+                    "start": start.isoformat(),
+                    "end": end.isoformat(),
+                }
+            elif ctrl["type"] == "categorical":
+                widget: QListWidget = ctrl["widget"]
+                selected: List[Any] = []
+                for idx in range(widget.count()):
+                    item = widget.item(idx)
+                    if item.checkState() == Qt.Checked:
+                        selected.append(normalize_json_value(item.data(Qt.UserRole)))
+                values[col] = {
+                    "type": "categorical",
+                    "selected": selected,
+                }
+
+        return {"columns": columns, "values": values}
+
+    def apply_filter_state(self, state: Dict[str, Any]) -> None:
+        if self.df is None:
+            return
+        columns = set(state.get("columns", []))
+        for i in range(self.filter_column_list.count()):
+            item = self.filter_column_list.item(i)
+            item.setCheckState(Qt.Checked if item.text() in columns else Qt.Unchecked)
+
+        self.rebuild_filter_widgets()
+
+        values = state.get("values", {})
+        for col, cfg in values.items():
+            ctrl = self.filter_controls.get(col)
+            if not ctrl:
+                continue
+            if ctrl["type"] == "numeric" and cfg.get("type") == "numeric":
+                ctrl["min"].setValue(float(cfg.get("min", ctrl["min"].value())))
+                ctrl["max"].setValue(float(cfg.get("max", ctrl["max"].value())))
+            elif ctrl["type"] == "datetime" and cfg.get("type") == "datetime":
+                try:
+                    start_date = QDate.fromString(cfg.get("start", ""), "yyyy-MM-dd")
+                    end_date = QDate.fromString(cfg.get("end", ""), "yyyy-MM-dd")
+                    if start_date.isValid():
+                        ctrl["start"].setDate(start_date)
+                    if end_date.isValid():
+                        ctrl["end"].setDate(end_date)
+                except Exception:
+                    pass
+            elif ctrl["type"] == "categorical" and cfg.get("type") == "categorical":
+                selected_raw = cfg.get("selected", [])
+                selected_set = {normalize_json_value(v) for v in selected_raw}
+                widget: QListWidget = ctrl["widget"]
+                for idx in range(widget.count()):
+                    item = widget.item(idx)
+                    value = normalize_json_value(item.data(Qt.UserRole))
+                    item.setCheckState(Qt.Checked if value in selected_set else Qt.Unchecked)
+
         self.apply_filters()
 
     def update_builder_options(self) -> None:
@@ -560,6 +826,65 @@ class MainWindow(QMainWindow):
 
         self.update_default_title()
         self.refresh_preview()
+
+    def _load_templates(self) -> None:
+        self.templates = load_templates()
+        self.refresh_template_combo()
+
+    def refresh_template_combo(self) -> None:
+        if not hasattr(self, "template_combo"):
+            return
+        self.template_combo.blockSignals(True)
+        self.template_combo.clear()
+        for tpl in self.templates:
+            name = tpl.get("name")
+            if name:
+                self.template_combo.addItem(name)
+        self.template_combo.blockSignals(False)
+
+    def save_template(self) -> None:
+        if self.df is None:
+            QMessageBox.information(self, "模板", "請先載入資料")
+            return
+        name = next_template_name(self.templates)
+        template = {
+            "name": name,
+            "charts": [asdict(cfg) for cfg in self.charts],
+            "filters": self.get_filter_state(),
+        }
+        self.templates.append(template)
+        save_templates(self.templates)
+        self.refresh_template_combo()
+        self.template_combo.setCurrentText(name)
+        self.template_status.setText(f"已儲存 {name}")
+
+    def apply_template(self) -> None:
+        name = self.template_combo.currentText()
+        if not name:
+            return
+        template = next((tpl for tpl in self.templates if tpl.get("name") == name), None)
+        if not template:
+            return
+        chart_data = template.get("charts", [])
+        charts: List[ChartConfig] = []
+        for cfg in chart_data:
+            try:
+                charts.append(ChartConfig(**cfg))
+            except Exception:
+                continue
+        self.charts = charts
+        self.apply_filter_state(template.get("filters", {}))
+        self.refresh_dashboard()
+        self.template_status.setText(f"已套用 {name}")
+
+    def delete_template(self) -> None:
+        name = self.template_combo.currentText()
+        if not name:
+            return
+        self.templates = [tpl for tpl in self.templates if tpl.get("name") != name]
+        save_templates(self.templates)
+        self.refresh_template_combo()
+        self.template_status.setText(f"已刪除 {name}")
 
     def update_default_title(self) -> None:
         chart_type = self.chart_type_combo.currentText()
