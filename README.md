@@ -73,15 +73,10 @@
 3. `pyinstaller --onedir --noconsole --name CsvDashboardUpdater --collect-all PySide6 --collect-all pandas --collect-all numpy updater.py`
 
 **Windows 工作排程（每天 12:00 自動更新）**
-1. 把 `windows-bundle` 解壓縮  
-2. 進入資料夾後執行 `schedule_task.bat`  
+1. 下載 GitHub Actions 的 `windows-exe`  
+2. 解壓縮後執行 `schedule_task.bat`  
 3. 排程會每天 12:00 執行 `CsvDashboardUpdater`
 4. 若要移除排程，執行 `remove_task.bat`
-
-**Nuitka（可選）**
-```
-python -m nuitka --standalone --enable-plugin=pyside6 --output-dir=nuitka_dist --output-filename=CsvDashboardDesktop.exe app.py
-```
 
 > EXE 不需要安裝 Python 或編譯工具即可執行  
 > 若遇到閃退，請確認已安裝 Microsoft Visual C++ Redistributable (x64)

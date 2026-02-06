@@ -21,29 +21,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install pyinstaller nuitka
+          pip install pyinstaller
 
       - name: Build CsvDashboardDesktop
         run: |
           pyinstaller --onedir --noconsole --name CsvDashboardDesktop --collect-all PySide6 --collect-all pandas --collect-all numpy app.py
           pyinstaller --onedir --noconsole --name CsvDashboardUpdater --collect-all PySide6 --collect-all pandas --collect-all numpy updater.py
 
-      - name: Build CsvDashboardDesktop (Nuitka)
-        run: |
-          python -m nuitka --standalone --output-dir=nuitka_dist --assume-yes-for-downloads --enable-plugin=pyside6 --output-filename=CsvDashboardDesktop.exe app.py
-
-      - name: Prepare bundle
-        run: |
-          mkdir bundle
-          xcopy /E /I /Y dist\\CsvDashboardDesktop bundle\\CsvDashboardDesktop
-          xcopy /E /I /Y dist\\CsvDashboardUpdater bundle\\CsvDashboardUpdater
-          xcopy /Y schedule_task.bat bundle\\schedule_task.bat
-          xcopy /Y remove_task.bat bundle\\remove_task.bat
-          if exist nuitka_dist\\CsvDashboardDesktop.dist xcopy /E /I /Y nuitka_dist\\CsvDashboardDesktop.dist bundle\\Nuitka\\CsvDashboardDesktop
-
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: windows-bundle
+          name: windows-exe
           path: |
-            bundle/**
+            dist/CsvDashboardDesktop/**
+            dist/CsvDashboardUpdater/**
+            schedule_task.bat
+            remove_task.bat

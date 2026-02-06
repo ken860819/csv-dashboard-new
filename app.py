@@ -13,7 +13,7 @@ import re
 import numpy as np
 import pandas as pd
 from PySide6.QtCore import QAbstractTableModel, QDate, QDateTime, QMargins, QTimer, QModelIndex, Qt
-from PySide6.QtGui import QAction, QFont, QPainter
+from PySide6.QtGui import QAction, QCursor, QFont, QPainter
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QInputDialog,
     QLabel,
     QLineEdit,
@@ -39,6 +40,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QTabWidget,
     QTableView,
+    QToolTip,
     QVBoxLayout,
     QWidget,
     QFileDialog,
@@ -196,6 +198,20 @@ def normalize_json_value(value: Any) -> Any:
     if isinstance(value, (pd.Timestamp, datetime)):
         return value.isoformat()
     return value
+
+
+def attach_bar_tooltips(bar_set: QBarSet, categories: List[str]) -> None:
+    def on_hovered(status: bool, index: int) -> None:
+        if not status:
+            QToolTip.hideText()
+            return
+        if index < 0 or index >= len(categories):
+            return
+        label = categories[index]
+        value = bar_set.at(index)
+        QToolTip.showText(QCursor.pos(), f"{bar_set.label()}\n{label}: {value}")
+
+    bar_set.hovered.connect(on_hovered)
 
 
 class MainWindow(QMainWindow):
@@ -588,6 +604,7 @@ class MainWindow(QMainWindow):
 
         self.preview_table = QTableView()
         self.preview_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.configure_table_view(self.preview_table)
         preview_layout.addWidget(self.preview_table)
 
         self.tabs.addTab(preview_widget, "預覽")
@@ -607,6 +624,7 @@ class MainWindow(QMainWindow):
 
         self.pivot_table = QTableView()
         self.pivot_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.configure_table_view(self.pivot_table)
         pivot_layout.addWidget(self.pivot_table)
 
         self.tabs.addTab(pivot_widget, "樞紐")
@@ -759,6 +777,15 @@ class MainWindow(QMainWindow):
             item = self.filter_column_list.item(i)
             text = item.text().lower()
             item.setHidden(bool(keyword) and keyword not in text)
+
+    def configure_table_view(self, table: QTableView) -> None:
+        table.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        header = table.horizontalHeader()
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setStretchLastSection(False)
+        table.setWordWrap(False)
+        table.setTextElideMode(Qt.ElideRight)
 
     def refresh_pivot_lists(self) -> None:
         if self.df is None:
@@ -1495,6 +1522,7 @@ class MainWindow(QMainWindow):
 
                     table = QTableView()
                     table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                    self.configure_table_view(table)
                     table.setModel(DataFrameModel(pivot_df.head(1000)))
                     table.setMinimumHeight(220)
                     frame_layout.addWidget(table)
@@ -1801,6 +1829,7 @@ class MainWindow(QMainWindow):
                             values.append(float(value.iloc[0]) if not value.empty else 0.0)
                         bar_set = QBarSet(key)
                         bar_set.append(values)
+                        attach_bar_tooltips(bar_set, categories)
                         series.append(bar_set)
                 else:
                     values = [
@@ -1809,6 +1838,7 @@ class MainWindow(QMainWindow):
                     ]
                     bar_set = QBarSet(y_field)
                     bar_set.append(values)
+                    attach_bar_tooltips(bar_set, categories)
                     series.append(bar_set)
 
                 chart.addSeries(series)
@@ -2016,6 +2046,7 @@ class MainWindow(QMainWindow):
                 bar_set = QBarSet(str(col))
                 values = [float(v) for v in data_df[col].tolist()]
                 bar_set.append(values)
+                attach_bar_tooltips(bar_set, categories)
                 bar_series.append(bar_set)
 
             chart.addSeries(bar_series)
