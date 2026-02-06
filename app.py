@@ -113,6 +113,7 @@ class ChartConfig:
     pivot_vals: Optional[List[str]] = None
     pivot_agg: Optional[str] = None
     pivot_chart_type: Optional[str] = None
+    pivot_values_in_columns: Optional[bool] = None
 
 
 BASE_DIR = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else Path(__file__).resolve().parent
@@ -517,6 +518,11 @@ class MainWindow(QMainWindow):
         self.pivot_chart_combo.addItems(["長條", "折線", "長條+折線"])
         self.pivot_chart_combo.currentTextChanged.connect(self.apply_pivot)
         form.addRow("圖表", self.pivot_chart_combo)
+
+        self.pivot_values_in_columns = QCheckBox("值放在欄（Excel）")
+        self.pivot_values_in_columns.setChecked(True)
+        self.pivot_values_in_columns.toggled.connect(self.apply_pivot)
+        form.addRow("", self.pivot_values_in_columns)
         layout.addLayout(form)
 
         btn_row = QHBoxLayout()
@@ -541,6 +547,10 @@ class MainWindow(QMainWindow):
 
         self.template_combo = QComboBox()
         layout.addWidget(self.template_combo)
+
+        self.template_refresh_checkbox = QCheckBox("套用模板時先更新資料")
+        self.template_refresh_checkbox.setChecked(False)
+        layout.addWidget(self.template_refresh_checkbox)
 
         button_row = QHBoxLayout()
         self.template_apply_button = QPushButton("套用模板")
@@ -783,12 +793,13 @@ class MainWindow(QMainWindow):
                 values.append(item.text())
         return values
 
-    def get_pivot_selection(self) -> Tuple[List[str], List[str], List[str], str]:
+    def get_pivot_selection(self) -> Tuple[List[str], List[str], List[str], str, bool]:
         rows = self.get_checked_items(self.pivot_rows_list)
         cols = self.get_checked_items(self.pivot_cols_list)
         vals = self.get_checked_items(self.pivot_vals_list)
         agg = self.pivot_agg_combo.currentText()
-        return rows, cols, vals, agg
+        values_in_columns = self.pivot_values_in_columns.isChecked()
+        return rows, cols, vals, agg, values_in_columns
 
     def compute_pivot(
         self,
@@ -797,6 +808,7 @@ class MainWindow(QMainWindow):
         cols: List[str],
         vals: List[str],
         agg: str,
+        values_in_columns: bool,
     ) -> Tuple[pd.DataFrame, Union[pd.DataFrame, pd.Series]]:
         if vals:
             pivot = pd.pivot_table(
@@ -817,6 +829,12 @@ class MainWindow(QMainWindow):
                 fill_value=0,
                 dropna=False,
             )
+
+        if vals and (not values_in_columns) and len(vals) > 1:
+            if isinstance(pivot, pd.DataFrame):
+                pivot = pivot.stack(0)
+            elif isinstance(pivot, pd.Series):
+                pivot = pivot.to_frame(name="value").stack(0)
 
         pivot_df = pivot.copy()
         if isinstance(pivot_df, pd.Series):
@@ -1015,7 +1033,7 @@ class MainWindow(QMainWindow):
     def apply_pivot(self) -> None:
         if self.filtered_df is None:
             return
-        rows, cols, vals, agg = self.get_pivot_selection()
+        rows, cols, vals, agg, values_in_columns = self.get_pivot_selection()
 
         if not rows and not cols:
             self.pivot_message.setText("請至少選擇「列」或「欄」")
@@ -1023,7 +1041,7 @@ class MainWindow(QMainWindow):
 
         df = self.filtered_df.copy()
         try:
-            pivot_df, pivot = self.compute_pivot(df, rows, cols, vals, agg)
+            pivot_df, pivot = self.compute_pivot(df, rows, cols, vals, agg, values_in_columns)
             self.pivot_df = pivot_df
 
             model = DataFrameModel(pivot_df)
@@ -1040,12 +1058,12 @@ class MainWindow(QMainWindow):
     def add_pivot_to_dashboard(self) -> None:
         if self.filtered_df is None:
             return
-        rows, cols, vals, agg = self.get_pivot_selection()
+        rows, cols, vals, agg, values_in_columns = self.get_pivot_selection()
         if not rows and not cols:
             QMessageBox.information(self, "樞紐", "請至少選擇「列」或「欄」")
             return
         try:
-            pivot_df, pivot = self.compute_pivot(self.filtered_df, rows, cols, vals, agg)
+            pivot_df, pivot = self.compute_pivot(self.filtered_df, rows, cols, vals, agg, values_in_columns)
         except Exception as exc:
             QMessageBox.critical(self, "樞紐", f"樞紐失敗: {exc}")
             return
@@ -1074,6 +1092,7 @@ class MainWindow(QMainWindow):
             pivot_vals=vals,
             pivot_agg=agg,
             pivot_chart_type=self.pivot_chart_combo.currentText(),
+            pivot_values_in_columns=values_in_columns,
         )
         self.charts.append(cfg)
         self.pivot_df = pivot_df
@@ -1298,6 +1317,13 @@ class MainWindow(QMainWindow):
         name = self.template_combo.currentText()
         if not name:
             return
+        if self.template_refresh_checkbox.isChecked():
+            if not self.path_input.text().strip():
+                QMessageBox.information(self, "模板", "請先設定資料路徑")
+                return
+            if not self.load_from_path(show_message=False):
+                QMessageBox.warning(self, "模板", "更新資料失敗，已取消套用模板")
+                return
         template = next((tpl for tpl in self.templates if tpl.get("name") == name), None)
         if not template:
             return
@@ -1305,7 +1331,14 @@ class MainWindow(QMainWindow):
         charts: List[ChartConfig] = []
         for cfg in chart_data:
             try:
-                charts.append(ChartConfig(**cfg))
+                cfg_fixed = dict(cfg)
+                if cfg_fixed.get("chart_type") == "Area":
+                    cfg_fixed["chart_type"] = "Line"
+                if not cfg_fixed.get("x_cols") and cfg_fixed.get("x_col"):
+                    cfg_fixed["x_cols"] = [cfg_fixed.get("x_col")]
+                if "pivot_values_in_columns" not in cfg_fixed:
+                    cfg_fixed["pivot_values_in_columns"] = True
+                charts.append(ChartConfig(**cfg_fixed))
             except Exception:
                 continue
         self.charts = charts
@@ -1438,8 +1471,16 @@ class MainWindow(QMainWindow):
                 cols = cfg.pivot_cols or []
                 vals = cfg.pivot_vals or []
                 agg = cfg.pivot_agg or "sum"
+                values_in_columns = True if cfg.pivot_values_in_columns is None else cfg.pivot_values_in_columns
                 try:
-                    pivot_df, pivot_raw = self.compute_pivot(self.filtered_df, rows, cols, vals, agg)
+                    pivot_df, pivot_raw = self.compute_pivot(
+                        self.filtered_df,
+                        rows,
+                        cols,
+                        vals,
+                        agg,
+                        values_in_columns,
+                    )
                     view = QChartView(
                         self.build_pivot_chart(
                             pivot_raw,
